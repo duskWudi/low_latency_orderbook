@@ -1,5 +1,7 @@
 # Low-Latency C++ Limit Order Book
 
+[![CI](https://github.com/duskWudi/low_latency_orderbook/actions/workflows/ci.yml/badge.svg)](https://github.com/duskWudi/low_latency_orderbook/actions/workflows/ci.yml)
+
 A simplified C++17 limit order book and matching engine focused on
 low-latency design: price-time priority matching, cancellation, trade
 generation, file-based event replay, and nanosecond-level latency
