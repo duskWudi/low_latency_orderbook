@@ -12,7 +12,7 @@ On a synthetic 1M-operation workload it sustains **~7.9M ops/s** with an
 
 ## About
 
-This is a trading-systems project, not a fake trading bot. It demonstrates:
+This is a trading-systems project, not a fake trading bot. It includes:
 
 - C++ object-oriented design
 - Trading market structure
