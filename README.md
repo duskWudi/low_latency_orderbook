@@ -10,7 +10,7 @@ measurement.
 On a synthetic 1M-operation workload it sustains **~7.9M ops/s** with an
 **ADD p50 of ~100 ns** (see [Benchmark](#benchmark)).
 
-## Why this project matters
+## About
 
 This is a trading-systems project, not a fake trading bot. It demonstrates:
 
@@ -165,10 +165,3 @@ same price match FIFO, giving price-time priority.
 - Add SIMD / batch parsing for very large replay files.
 - Add a custom slab allocator tuned to cache line size.
 - Multi-instrument support with per-symbol books.
-
-## Resume bullet
-
-Built a low-latency C++ limit order book and matching engine supporting
-price-time priority, order cancellation, file-based event replay, trade
-generation, and nanosecond-level p50/p99 latency reporting; sustains
-~7.9M ops/s with ~100 ns median add latency on a 1M-operation benchmark.
