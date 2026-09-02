@@ -8,8 +8,11 @@ text file, and reporting p50/p99 latency per operation.
 
 I wrote it to see how fast a book gets once you remove the two things that
 usually dominate the hot path: heap allocation per operation, and pointer
-chasing through node-based containers. On my laptop a synthetic 1M-operation
-workload runs at roughly 7.9M ops/s with a median ADD around 100 ns.
+chasing through node-based containers. On my machine a synthetic 1M-operation
+workload runs somewhere between 6 and 8M ops/s, with a median add at the
+resolution floor of the Windows timer. See
+[how the benchmark works](#how-the-benchmark-works) for what that measures
+and what it does not.
 
 ## How it works
 
@@ -114,29 +117,6 @@ CANCEL 1
 PRINT
 ```
 
-## Benchmark
-
-`tools/benchmark.cpp` generates a deterministic mix of adds and cancels
-(about 15% cancels) clustered in a 21-tick band around price 10000, so the
-book genuinely crosses and produces trades instead of just piling up resting
-orders. It replays that workload twice: once clean for throughput, once with
-timing around every operation for latency.
-
-From one run of `./orderbook_bench 1000000` at `-O2`:
-
-| Metric         | Value                    |
-| -------------- | ------------------------ |
-| Operations     | 1,000,000                |
-| Throughput     | ~7.9 M ops/s             |
-| ADD latency    | p50 ~100 ns, p99 ~600 ns |
-| CANCEL latency | p50 ~100 ns, p99 ~700 ns |
-
-Treat these as a rough shape, not a spec. They move around by machine and
-by build, and the `max` figure is always an outlier because the first
-operation pays for page commits and a cold cache. Note also that the timing
-pass calls `high_resolution_clock` twice per operation, which is not free
-when the operation itself is ~100 ns.
-
 ## Not done yet
 
 Single instrument, single thread. Only limit orders, so no market, IOC, or
@@ -145,3 +125,58 @@ FOK, and no order modification. The order id lookup is still
 open-addressing map. Parsing is one line at a time, so large replay files
 would benefit from batching. A slab allocator sized to cache lines would be
 worth trying too.
+
+## How the benchmark works
+
+`tools/benchmark.cpp` builds the whole workload in memory first, then
+replays it. Generation uses a xorshift64 PRNG with a hardcoded seed, so the
+same operation count always produces the same sequence and two runs are
+comparable.
+
+The mix is about 15% cancels and the rest adds, with random sides,
+quantities of 1 to 10, and prices spread over a 21-tick band around 10000.
+The narrow band is deliberate: it keeps bids and asks colliding so the
+matching path actually runs, instead of building two walls of resting orders
+that never trade. Cancel targets are drawn from every id issued so far,
+including orders that already filled, so a share of cancels miss and return
+`false`. That is intentional, since a real feed cancels late too.
+
+The replay happens twice on two fresh books. The first pass runs clean and
+takes one wall-clock reading around the entire loop, which gives throughput.
+The second pass brackets every single operation with
+`high_resolution_clock`, which gives the p50/p99 split for adds and cancels
+separately. They are separate passes because two clock reads per operation
+cost real time when the operation itself is around 100 ns, so folding them
+into the throughput number would understate it.
+
+```bash
+./orderbook_bench 1000000
+```
+
+Repeat runs on my machine, g++ 14.2 at `-O2`, Windows 11 x64:
+
+| Metric          | Value                        |
+| --------------- | ---------------------------- |
+| Operations      | 1,000,000                    |
+| Trades          | 615,369                      |
+| Resting at end  | 144,887                      |
+| Throughput      | 6.3 to 7.6 M ops/s           |
+| ADD latency     | p50 100 ns, p99 500 to 600 ns |
+| CANCEL latency  | p50 100 ns, p99 600 to 700 ns |
+
+The trade and resting counts are identical run to run, which is the seeded
+workload doing its job. Throughput is the noisy part, swinging about 20%
+between runs on an unpinned thread with other things on the machine.
+
+Two caveats on the latency figures. Every sample comes back as a multiple of
+100 ns with a minimum of 0, because that is the tick resolution of
+`high_resolution_clock` on Windows, so a p50 of 100 ns means one tick and the
+true median is somewhere at or below it. And `max` lands in the hundreds of
+microseconds to low milliseconds, which is not the engine but page commits as
+the order pool grows plus the scheduler taking the thread away.
+
+Worth being clear about what this does not cover. The workload is
+pre-generated, so `EventParser` and file IO are outside the measured region
+and these numbers say nothing about parsing speed. It is single threaded with
+no contention, and everything stays hot in cache, which is friendlier than a
+real feed would be.
