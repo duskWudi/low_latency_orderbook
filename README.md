@@ -2,53 +2,48 @@
 
 [![CI](https://github.com/duskWudi/low_latency_orderbook/actions/workflows/ci.yml/badge.svg)](https://github.com/duskWudi/low_latency_orderbook/actions/workflows/ci.yml)
 
-A simplified C++17 limit order book and matching engine focused on
-low-latency design: price-time priority matching, cancellation, trade
-generation, file-based event replay, and nanosecond-level latency
-measurement.
+A limit order book and matching engine in C++17. It handles price-time
+priority matching, cancellation, trade generation, replaying events from a
+text file, and reporting p50/p99 latency per operation.
 
-On a synthetic 1M-operation workload it sustains **~7.9M ops/s** with an
-**ADD p50 of ~100 ns** (see [Benchmark](#benchmark)).
+I wrote it to see how fast a book gets once you remove the two things that
+usually dominate the hot path: heap allocation per operation, and pointer
+chasing through node-based containers. On my laptop a synthetic 1M-operation
+workload runs at roughly 7.9M ops/s with a median ADD around 100 ns.
 
-## About
+## How it works
 
-This is a trading-systems project, not a fake trading bot. It includes:
+Three choices do most of the work.
 
-- C++ object-oriented design
-- Trading market structure
-- Price-time priority matching
-- Data structure choices for low latency
-- Latency measurement (p50 / p99)
-- Clean command parsing
-- Practical systems programming
+Resting orders all live in one `std::vector<OrderNode>` and get recycled
+through a free list. Adding an order takes a node off the free list,
+cancelling puts it back. Once the pool has grown, add and cancel never call
+the allocator.
 
-## Design
+Price levels are a flat array indexed by price, so the level for a price is
+just `levels_[price]`. There is no tree to search. Two cursors, `best_bid_`
+and `best_ask_`, track the top of book and only move when a level empties.
 
-The matching engine avoids per-operation heap allocation and the pointer
-chasing of node-based containers:
+Orders at the same price are chained in an intrusive doubly linked list of
+pool indices. That keeps FIFO order within a price level and makes
+cancellation O(1) once you know which node to unlink, which an
+`unordered_map<int, int>` from order id to pool index gives you.
 
-1. **Order memory pool** – all resting orders live in one contiguous
-   `std::vector<OrderNode>`, recycled through a free list. After warmup,
-   add/cancel never call the global allocator.
-2. **Flat array price levels** – `levels_` is indexed directly by price for
-   O(1) access to any level. `best_bid_` / `best_ask_` cursors track the top
-   of book so matching never searches a tree.
-3. **Intrusive linked-list levels** – orders at the same price are chained by
-   `prev`/`next` indices into the pool, preserving FIFO price-time priority
-   and giving O(1) cancellation.
+Prices are plain integers, so `10000` can mean $100.00 depending on how you
+read it. Nothing here uses floating point, so there is no rounding to argue
+about.
 
-Supporting pieces:
+The flat price array costs memory: the book reserves a level for every price
+from 0 up to `max_price`, whether anyone quotes there or not. That is a good
+trade for a single instrument with a known tick range, and a bad one for
+anything sparse or unbounded.
 
-- `OrderBook` owns the matching logic.
-- `EventParser` converts text commands into typed events using
-  `std::string_view` + `std::from_chars` (no streams, no per-line allocations).
-- `LatencyStats` records and reports p50/p99 operation latency.
-- `Order`, `Trade`, and `Side` model the core trading objects.
+The rest is small. `OrderBook` is the engine. `EventParser` turns text lines
+into typed events with `string_view` and `from_chars`, so it avoids streams
+and per-line allocation. `LatencyStats` collects timings and prints the
+percentiles. `Order`, `Trade`, and `Side` are the value types.
 
-Prices are integers (e.g. `10000` can mean `$100.00`) to avoid
-floating-point precision problems.
-
-## Project layout
+## Layout
 
 ```
 src/        engine, parser, latency stats, demo entry point (main.cpp)
@@ -57,21 +52,20 @@ tools/      synthetic benchmark (benchmark.cpp)
 data/       sample event file
 ```
 
-## Build
+## Building
 
-### With CMake
+With CMake:
 
 ```bash
-mkdir build
-cd build
+mkdir build && cd build
 cmake ..
 cmake --build .
 ```
 
-This produces three targets: `orderbook`, `orderbook_tests`, and
+That gives you three binaries: `orderbook`, `orderbook_tests`, and
 `orderbook_bench`.
 
-### With g++ directly
+Or straight from g++ if you would rather skip CMake:
 
 ```bash
 # engine
@@ -84,30 +78,21 @@ g++ -std=c++17 -O2 -Isrc -o orderbook_tests tests/test_orderbook.cpp src/OrderBo
 g++ -std=c++17 -O2 -Isrc -o orderbook_bench tools/benchmark.cpp src/OrderBook.cpp src/LatencyStats.cpp
 ```
 
-## Run
+## Running
 
-Built-in demo:
+With no arguments `orderbook` replays a small built-in demo. Pass a file to
+replay that instead:
 
 ```bash
 ./orderbook
-```
-
-With sample data:
-
-```bash
 ./orderbook data/sample_orders.txt
 ```
 
-Tests:
+Tests and benchmark:
 
 ```bash
 ./orderbook_tests
-```
-
-Benchmark (default 1,000,000 operations, optional count argument):
-
-```bash
-./orderbook_bench 1000000
+./orderbook_bench 1000000     # operation count is optional, defaults to 1M
 ```
 
 ## Input format
@@ -118,7 +103,8 @@ CANCEL <id>
 PRINT
 ```
 
-Lines beginning with `#` are ignored. Example:
+Commands are case-insensitive, `B` and `S` work as shorthand for the side,
+blank lines are skipped, and anything starting with `#` is a comment.
 
 ```txt
 ADD 1 BUY 10000 10
@@ -130,38 +116,32 @@ PRINT
 
 ## Benchmark
 
-A deterministic ADD/CANCEL workload centered on one price band (so the book
-actually crosses and trades), replayed once for throughput and once for
-per-operation latency.
+`tools/benchmark.cpp` generates a deterministic mix of adds and cancels
+(about 15% cancels) clustered in a 21-tick band around price 10000, so the
+book genuinely crosses and produces trades instead of just piling up resting
+orders. It replays that workload twice: once clean for throughput, once with
+timing around every operation for latency.
 
-Example run (`./orderbook_bench 1000000`, `-O2`):
+From one run of `./orderbook_bench 1000000` at `-O2`:
 
-| Metric         | Value          |
-| -------------- | -------------- |
-| Operations     | 1,000,000      |
-| Throughput     | ~7.9 M ops/s   |
+| Metric         | Value                    |
+| -------------- | ------------------------ |
+| Operations     | 1,000,000                |
+| Throughput     | ~7.9 M ops/s             |
 | ADD latency    | p50 ~100 ns, p99 ~600 ns |
 | CANCEL latency | p50 ~100 ns, p99 ~700 ns |
 
-Numbers vary by machine; the first operation pays a one-time
-page-commit / cache warmup cost that shows up only in the `max` figure.
+Treat these as a rough shape, not a spec. They move around by machine and
+by build, and the `max` figure is always an outlier because the first
+operation pays for page commits and a cold cache. Note also that the timing
+pass calls `high_resolution_clock` twice per operation, which is not free
+when the operation itself is ~100 ns.
 
-## Data structures
+## Not done yet
 
-The book uses:
-
-- A contiguous order pool (`std::vector<OrderNode>`) with a free list.
-- A flat `std::vector<PriceLevel>` indexed by price, with `best_bid_` /
-  `best_ask_` cursors.
-- `std::unordered_map<int, int>` mapping order id to pool index for O(1)
-  cancellation.
-
-Bids match highest price first, asks lowest price first, and orders at the
-same price match FIFO, giving price-time priority.
-
-## Possible next optimizations
-
-- Replace `std::unordered_map` order index with an open-addressing map.
-- Add SIMD / batch parsing for very large replay files.
-- Add a custom slab allocator tuned to cache line size.
-- Multi-instrument support with per-symbol books.
+Single instrument, single thread. Only limit orders, so no market, IOC, or
+FOK, and no order modification. The order id lookup is still
+`std::unordered_map`, which is the first thing I would replace with an
+open-addressing map. Parsing is one line at a time, so large replay files
+would benefit from batching. A slab allocator sized to cache lines would be
+worth trying too.
